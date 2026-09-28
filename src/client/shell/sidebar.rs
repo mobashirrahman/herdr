@@ -314,7 +314,9 @@ pub(crate) fn render_sidebar(
             target.matches(state.active_endpoint_id, &workspace.workspace_id)
         });
         let dragged = state.dragged_workspace_id == Some(workspace.workspace_id.as_str());
-        if selected {
+        let tab_drop_target =
+            state.tab_workspace_drop_target_id == Some(workspace.workspace_id.as_str());
+        if selected || tab_drop_target {
             buffer.set_style(rect, Style::default().bg(palette.selection_bg));
         } else if dragged {
             buffer.set_style(rect, Style::default().bg(palette.surface1));
@@ -329,7 +331,7 @@ pub(crate) fn render_sidebar(
             entry,
             rows,
             workspace.focused,
-            selected,
+            selected || tab_drop_target,
             state.selected_workspace_id.is_some(),
             dragged,
             palette,
@@ -383,13 +385,30 @@ pub(crate) fn render_sidebar(
             5.min(workspace_area.width),
             u16::from(workspace_area.height > 0),
         );
+        if state.tab_workspace_drop_new {
+            buffer.set_style(
+                Rect::new(
+                    workspace_area.x,
+                    footer_y,
+                    workspace_area.width,
+                    u16::from(workspace_area.height > 0),
+                ),
+                Style::default().bg(palette.selection_bg),
+            );
+        }
         put_text(
             buffer,
             workspace_area.x,
             footer_y,
             workspace_area.width,
             " new",
-            Style::default().fg(palette.overlay0),
+            if state.tab_workspace_drop_new {
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(palette.overlay0)
+            },
         );
         let attention = super::super::global_menu::global_menu_attention(snapshot);
         let launcher_width = if attention { 8 } else { 6 }.min(workspace_area.width);

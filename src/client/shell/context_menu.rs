@@ -43,6 +43,7 @@ impl ClientContextMenuOverlay {
             ],
             ClientContextMenuTarget::Tab { .. } => vec![
                 item("New tab", Action::NewTab),
+                item("Move to new workspace", Action::MoveToNewWorkspace),
                 item("Rename", Action::Rename),
                 item("Close", Action::Close),
             ],
@@ -359,6 +360,18 @@ impl ClientShellState {
             }
             ClientContextMenuAction::Close => {
                 self.request_tab_close(tab_id, outcome);
+            }
+            ClientContextMenuAction::MoveToNewWorkspace => {
+                if let Some((pane_id, tab_label)) = self.focused_pane_for_tab(&tab_id) {
+                    self.push_tab_to_workspace_methods(
+                        &tab_id,
+                        &workspace_id,
+                        &pane_id,
+                        &tab_label,
+                        &TabWorkspaceDropTarget::NewWorkspace,
+                        outcome,
+                    );
+                }
             }
             _ => {}
         }

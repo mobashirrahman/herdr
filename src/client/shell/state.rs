@@ -186,6 +186,12 @@ pub(super) struct ClientTabPress {
     pub(super) start_row: u16,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum TabWorkspaceDropTarget {
+    NewWorkspace,
+    ExistingWorkspace { workspace_id: String },
+}
+
 pub(super) enum ClientChromeDrag {
     SidebarWidth,
     SidebarSection,
@@ -211,6 +217,13 @@ pub(super) enum ClientChromeDrag {
         tab_id: String,
         workspace_id: String,
         insert_index: Option<usize>,
+    },
+    TabToWorkspace {
+        tab_id: String,
+        workspace_id: String,
+        pane_id: String,
+        tab_label: String,
+        target: Option<TabWorkspaceDropTarget>,
     },
     Workspace {
         source_workspace_id: String,
@@ -517,6 +530,7 @@ pub(super) enum ClientContextMenuAction {
     RemoveWorktree,
     ToggleGroup,
     NewTab,
+    MoveToNewWorkspace,
     RenamePane,
     ClearPaneName,
     SwapWithFocusedPane,

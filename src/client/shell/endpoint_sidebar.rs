@@ -468,6 +468,8 @@ pub(super) fn render_expanded(
                 let selected = state.selected_workspace_id.is_some_and(|target| {
                     target.matches(&endpoint.endpoint_id, &workspace.workspace_id)
                 });
+                let tab_drop_target = endpoint_active
+                    && state.tab_workspace_drop_target_id == Some(workspace.workspace_id.as_str());
                 super::sidebar::render_workspace_rows(
                     buffer,
                     nested,
@@ -476,12 +478,14 @@ pub(super) fn render_expanded(
                     entry,
                     tokens,
                     endpoint_active && workspace.focused,
-                    selected,
+                    selected || tab_drop_target,
                     state.selected_workspace_id.is_some(),
                     false,
                     palette,
                 );
-                if endpoint.status != ClientEndpointStatus::Online {
+                if tab_drop_target {
+                    buffer.set_style(rect, Style::default().bg(palette.selection_bg));
+                } else if endpoint.status != ClientEndpointStatus::Online {
                     buffer.set_style(
                         rect,
                         Style::default()
@@ -531,7 +535,13 @@ pub(super) fn render_expanded(
             footer_y,
             workspace_area.width,
             &label,
-            Style::default().fg(palette.overlay0),
+            if state.tab_workspace_drop_new {
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(palette.overlay0)
+            },
         );
         let attention = active_snapshot.is_some_and(super::global_menu::global_menu_attention);
         let width = if attention { 8 } else { 6 }.min(workspace_area.width);

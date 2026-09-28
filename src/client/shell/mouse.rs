@@ -651,6 +651,139 @@ impl ClientShellState {
         }
     }
 
+    pub(super) fn focused_pane_for_tab(&self, tab_id: &str) -> Option<(String, String)> {
+        let snapshot = self.snapshot.as_deref()?;
+        let tab = snapshot.tabs.iter().find(|tab| tab.tab_id == tab_id)?;
+        let pane = snapshot
+            .panes
+            .iter()
+            .find(|pane| pane.tab_id == tab_id && pane.focused)
+            .or_else(|| snapshot.panes.iter().find(|pane| pane.tab_id == tab_id))?;
+        Some((pane.pane_id.clone(), tab.label.clone()))
+    }
+
+    pub(super) fn source_workspace_is_last_pane(&self, workspace_id: &str) -> bool {
+        self.snapshot.as_deref().is_some_and(|snapshot| {
+            snapshot
+                .panes
+                .iter()
+                .filter(|pane| pane.workspace_id == workspace_id)
+                .count()
+                <= 1
+        })
+    }
+
+    pub(super) fn source_workspace_label(
+        &self,
+        workspace_id: &str,
+    ) -> Option<(Option<String>, String)> {
+        self.snapshot.as_deref().and_then(|snapshot| {
+            snapshot
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.workspace_id == workspace_id)
+                .map(|workspace| {
+                    (
+                        workspace.custom_label.then(|| workspace.label.clone()),
+                        workspace.new_workspace_cwd.clone(),
+                    )
+                })
+        })
+    }
+
+    fn tab_to_workspace_drop_target_at(
+        &self,
+        point: (u16, u16),
+        source_workspace_id: &str,
+    ) -> Option<TabWorkspaceDropTarget> {
+        // Existing workspace hit on the active endpoint (not the source itself).
+        if let Some(hit) = self
+            .hits
+            .workspaces
+            .iter()
+            .find(|hit| super::contains(hit.rect, point))
+        {
+            if hit.endpoint_id == self.active_endpoint_id && hit.workspace_id != source_workspace_id
+            {
+                return Some(TabWorkspaceDropTarget::ExistingWorkspace {
+                    workspace_id: hit.workspace_id.clone(),
+                });
+            }
+            // Hovering the source workspace itself: no valid cross-level target.
+            return None;
+        }
+        // Empty sidebar body or the explicit new-workspace button creates a project.
+        if super::contains(self.hits.new_workspace, point) {
+            return Some(TabWorkspaceDropTarget::NewWorkspace);
+        }
+        if super::contains(self.hits.workspace_body, point) {
+            return Some(TabWorkspaceDropTarget::NewWorkspace);
+        }
+        None
+    }
+
+    pub(super) fn push_tab_to_workspace_methods(
+        &mut self,
+        tab_id: &str,
+        workspace_id: &str,
+        pane_id: &str,
+        tab_label: &str,
+        target: &TabWorkspaceDropTarget,
+        outcome: &mut ClientShellInput,
+    ) {
+        match target {
+            TabWorkspaceDropTarget::NewWorkspace => {
+                self.push_endpoint_method(
+                    crate::api::schema::Method::PaneMove(crate::api::schema::PaneMoveParams {
+                        pane_id: pane_id.to_owned(),
+                        destination: crate::api::schema::PaneMoveDestination::NewWorkspace {
+                            label: Some(tab_label.to_owned()),
+                            tab_label: Some(tab_label.to_owned()),
+                        },
+                        focus: true,
+                    }),
+                    outcome,
+                );
+            }
+            TabWorkspaceDropTarget::ExistingWorkspace {
+                workspace_id: target_id,
+            } => {
+                self.push_endpoint_method(
+                    crate::api::schema::Method::PaneMove(crate::api::schema::PaneMoveParams {
+                        pane_id: pane_id.to_owned(),
+                        destination: crate::api::schema::PaneMoveDestination::NewTab {
+                            workspace_id: Some(target_id.clone()),
+                            label: Some(tab_label.to_owned()),
+                        },
+                        focus: false,
+                    }),
+                    outcome,
+                );
+            }
+        }
+        // Keep the source project open when the moved pane is its last pane:
+        // the server closes emptied source workspaces, so resurrect it with a
+        // fresh tab instead of changing the wire protocol.
+        if self.source_workspace_is_last_pane(workspace_id) {
+            // tab_id is unused beyond pane resolution; keep signature explicit.
+            let _ = tab_id;
+            if let Some((label, cwd)) = self.source_workspace_label(workspace_id) {
+                self.push_endpoint_method(
+                    crate::api::schema::Method::WorkspaceCreate(
+                        crate::api::schema::WorkspaceCreateParams {
+                            source_workspace_id: None,
+                            cwd: Some(cwd),
+                            focus: false,
+                            label,
+                            env: Default::default(),
+                        },
+                    ),
+                    outcome,
+                );
+            }
+        }
+    }
+
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent, outcome: &mut ClientShellInput) {
         self.update_link_hover(mouse, outcome);
         let point = (mouse.column, mouse.row);
@@ -1162,7 +1295,27 @@ impl ClientShellState {
                     }
                     return;
                 }
-                Some(ClientChromeDrag::Tab { .. }) => {
+                Some(ClientChromeDrag::Tab {
+                    tab_id,
+                    workspace_id,
+                    ..
+                }) => {
+                    let tab_id = tab_id.clone();
+                    let workspace_id = workspace_id.clone();
+                    if let Some(target) = self.tab_to_workspace_drop_target_at(point, &workspace_id)
+                    {
+                        if let Some((pane_id, tab_label)) = self.focused_pane_for_tab(&tab_id) {
+                            self.chrome_drag = Some(ClientChromeDrag::TabToWorkspace {
+                                tab_id,
+                                workspace_id,
+                                pane_id,
+                                tab_label,
+                                target: Some(target),
+                            });
+                            outcome.repaint = true;
+                            return;
+                        }
+                    }
                     let insert_index = self.tab_drop_index_at(point);
                     if let Some(ClientChromeDrag::Tab {
                         insert_index: current,
@@ -1170,6 +1323,45 @@ impl ClientShellState {
                     }) = self.chrome_drag.as_mut()
                     {
                         *current = insert_index;
+                    }
+                    outcome.repaint = true;
+                    return;
+                }
+                Some(ClientChromeDrag::TabToWorkspace { workspace_id, .. }) => {
+                    let workspace_id = workspace_id.clone();
+                    if let Some(target) = self.tab_to_workspace_drop_target_at(point, &workspace_id)
+                    {
+                        if let Some(ClientChromeDrag::TabToWorkspace {
+                            target: current, ..
+                        }) = self.chrome_drag.as_mut()
+                        {
+                            *current = Some(target);
+                        }
+                        outcome.repaint = true;
+                        return;
+                    }
+                    // Dragged back onto the tab bar: resume reorder.
+                    if let Some(insert_index) = self.tab_drop_index_at(point) {
+                        if let Some(ClientChromeDrag::TabToWorkspace {
+                            tab_id,
+                            workspace_id,
+                            ..
+                        }) = self.chrome_drag.take()
+                        {
+                            self.chrome_drag = Some(ClientChromeDrag::Tab {
+                                tab_id,
+                                workspace_id,
+                                insert_index: Some(insert_index),
+                            });
+                            outcome.repaint = true;
+                        }
+                        return;
+                    }
+                    if let Some(ClientChromeDrag::TabToWorkspace {
+                        target: current, ..
+                    }) = self.chrome_drag.as_mut()
+                    {
+                        *current = None;
                     }
                     outcome.repaint = true;
                     return;
@@ -1213,6 +1405,22 @@ impl ClientShellState {
                     .abs_diff(press.start_column)
                     .max(mouse.row.abs_diff(press.start_row));
                 if delta >= 1 {
+                    let tab_id = press.tab_id.clone();
+                    let workspace_id = press.workspace_id.clone();
+                    if let Some(target) = self.tab_to_workspace_drop_target_at(point, &workspace_id)
+                    {
+                        if let Some((pane_id, tab_label)) = self.focused_pane_for_tab(&tab_id) {
+                            self.chrome_drag = Some(ClientChromeDrag::TabToWorkspace {
+                                tab_id,
+                                workspace_id,
+                                pane_id,
+                                tab_label,
+                                target: Some(target),
+                            });
+                            outcome.repaint = true;
+                            return;
+                        }
+                    }
                     if let Some(insert_index) = self.tab_drop_index_at(point) {
                         self.chrome_drag = Some(ClientChromeDrag::Tab {
                             tab_id: press.tab_id.clone(),
@@ -1235,31 +1443,96 @@ impl ClientShellState {
                         workspace_id,
                         ..
                     } => {
-                        let insert_index = self.tab_drop_index_at(point);
-                        let valid_drop = self.snapshot.as_deref().is_some_and(|snapshot| {
-                            snapshot.focused_workspace_id.as_deref() == Some(workspace_id.as_str())
-                                && snapshot.tabs.iter().any(|tab| {
-                                    tab.tab_id == tab_id && tab.workspace_id == workspace_id
-                                })
-                                && insert_index.is_some_and(|index| {
-                                    index
-                                        <= snapshot
-                                            .tabs
-                                            .iter()
-                                            .filter(|tab| tab.workspace_id == workspace_id)
-                                            .count()
-                                })
-                        });
-                        if valid_drop {
-                            self.push_endpoint_method(
-                                crate::api::schema::Method::TabMove(
-                                    crate::api::schema::TabMoveParams {
-                                        tab_id,
-                                        insert_index: insert_index.unwrap_or_default(),
-                                    },
-                                ),
+                        // Released over the sidebar: treat as cross-level drop.
+                        if let Some(target) =
+                            self.tab_to_workspace_drop_target_at(point, &workspace_id)
+                        {
+                            if let Some((pane_id, tab_label)) = self.focused_pane_for_tab(&tab_id) {
+                                self.push_tab_to_workspace_methods(
+                                    &tab_id,
+                                    &workspace_id,
+                                    &pane_id,
+                                    &tab_label,
+                                    &target,
+                                    outcome,
+                                );
+                            }
+                            outcome.repaint = true;
+                        } else {
+                            let insert_index = self.tab_drop_index_at(point);
+                            let valid_drop = self.snapshot.as_deref().is_some_and(|snapshot| {
+                                snapshot.focused_workspace_id.as_deref()
+                                    == Some(workspace_id.as_str())
+                                    && snapshot.tabs.iter().any(|tab| {
+                                        tab.tab_id == tab_id && tab.workspace_id == workspace_id
+                                    })
+                                    && insert_index.is_some_and(|index| {
+                                        index
+                                            <= snapshot
+                                                .tabs
+                                                .iter()
+                                                .filter(|tab| tab.workspace_id == workspace_id)
+                                                .count()
+                                    })
+                            });
+                            if valid_drop {
+                                self.push_endpoint_method(
+                                    crate::api::schema::Method::TabMove(
+                                        crate::api::schema::TabMoveParams {
+                                            tab_id,
+                                            insert_index: insert_index.unwrap_or_default(),
+                                        },
+                                    ),
+                                    outcome,
+                                );
+                            }
+                            outcome.repaint = true;
+                        }
+                    }
+                    ClientChromeDrag::TabToWorkspace {
+                        tab_id,
+                        workspace_id,
+                        pane_id,
+                        tab_label,
+                        target,
+                    } => {
+                        let target = target
+                            .or_else(|| self.tab_to_workspace_drop_target_at(point, &workspace_id));
+                        // Reverting to the tab bar without a sidebar target falls
+                        // back to a reorder when the pointer is over a valid slot.
+                        let reordered = if target.is_none() {
+                            self.tab_drop_index_at(point)
+                        } else {
+                            None
+                        };
+                        if let Some(target) = target {
+                            self.push_tab_to_workspace_methods(
+                                &tab_id,
+                                &workspace_id,
+                                &pane_id,
+                                &tab_label,
+                                &target,
                                 outcome,
                             );
+                        } else if let Some(insert_index) = reordered {
+                            let valid_drop = self.snapshot.as_deref().is_some_and(|snapshot| {
+                                snapshot.focused_workspace_id.as_deref()
+                                    == Some(workspace_id.as_str())
+                                    && snapshot.tabs.iter().any(|tab| {
+                                        tab.tab_id == tab_id && tab.workspace_id == workspace_id
+                                    })
+                            });
+                            if valid_drop {
+                                self.push_endpoint_method(
+                                    crate::api::schema::Method::TabMove(
+                                        crate::api::schema::TabMoveParams {
+                                            tab_id,
+                                            insert_index,
+                                        },
+                                    ),
+                                    outcome,
+                                );
+                            }
                         }
                         outcome.repaint = true;
                     }
